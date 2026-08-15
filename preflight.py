@@ -70,7 +70,9 @@ def check_torch_cuda() -> None:
 
     # bf16 weights plus activations and KV cache for a batch of short sequences.
     need_vram = config.APPROX_WEIGHTS_GB * 1.1
-    print(f"\n  need ~{need_vram:.0f}GB free VRAM for {config.PROBED_MODEL} in {config.DTYPE}")
+    print(
+        f"\n  need ~{need_vram:.0f}GB free VRAM for {config.PROBED_MODEL} in {config.DTYPE}"
+    )
     if total_vram < need_vram:
         block(
             f"only {total_vram:.1f}GB free VRAM across {n} device(s), need "
@@ -91,12 +93,14 @@ def check_storage() -> None:
 
     print(f"  HF_HOME         {config.HF_HOME}")
     print(
-        f"  its filesystem  {gb(usage.total):.1f}GB total, "
-        f"{gb(usage.free):.1f}GB free"
+        f"  its filesystem  {gb(usage.total):.1f}GB total, {gb(usage.free):.1f}GB free"
     )
     print(f"  need            ~{need_gb:.0f}GB for {config.PROBED_MODEL} weights")
 
-    for label, path in (("workspace", config.WORKSPACE), ("/dev/shm", Path("/dev/shm"))):
+    for label, path in (
+        ("workspace", config.WORKSPACE),
+        ("/dev/shm", Path("/dev/shm")),
+    ):
         if path.exists():
             u = shutil.disk_usage(path)
             print(f"  {label:<15} {gb(u.free):.1f}GB free of {gb(u.total):.1f}GB")
@@ -123,6 +127,12 @@ def check_storage() -> None:
 
 def check_ram() -> None:
     section("host RAM")
+    # /proc is Linux-only. Off the pod this check simply does not apply, and
+    # saying so is different from failing to read a file that should be there --
+    # a warning here would be noise on a laptop and would mask a real one.
+    if not Path("/proc/meminfo").exists():
+        print(f"  skipped: no /proc/meminfo on {sys.platform} -- Linux-only check")
+        return
     try:
         info = {}
         for line in Path("/proc/meminfo").read_text().splitlines():
@@ -164,7 +174,9 @@ def check_packages() -> None:
             version = getattr(m, "__version__", "?")
             print(f"  OK    {mod:<18} {version}")
         except ImportError:
-            block(f"{mod} not installed (needed by {used_by}) -- pip install -r requirements.txt")
+            block(
+                f"{mod} not installed (needed by {used_by}) -- pip install -r requirements.txt"
+            )
 
 
 def check_api_key() -> None:
@@ -194,7 +206,9 @@ def main() -> int:
     print(f"\n=== summary ({time.time() - t0:.1f}s) ===")
     if BLOCKERS:
         print(f"\n{'*' * 70}")
-        print(f"* {len(BLOCKERS)} BLOCKER(S) -- the pipeline will not complete as configured:")
+        print(
+            f"* {len(BLOCKERS)} BLOCKER(S) -- the pipeline will not complete as configured:"
+        )
         for b in BLOCKERS:
             print(f"*   - {b}")
         print(f"{'*' * 70}\n")

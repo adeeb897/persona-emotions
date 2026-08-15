@@ -81,6 +81,34 @@ a change genuinely requires revisiting one, stop and ask first.
    dropped**: filtering would break the crossed design unevenly across personas,
    which is the imbalance decision 8 exists to prevent.
 
+   The instruction alone did not hold: run 3 carried it and still produced 54
+   CJK rows (1.67%), 0.3–3.6% across personas — the gradient rising with
+   distance from the assistant, i.e. along the headline x-axis. So generation
+   also **rejects and redraws** a draw containing CJK, up to
+   `config.MAX_CJK_REDRAWS`, as a rule applied uniformly in every cell; the
+   corpus is a sample from P(text | English) identically for every persona. It
+   conditions on the output, and the defence is uniformity across cells rather
+   than post-hoc surgery on a finished corpus. Three properties of the
+   implementation are load-bearing and must not drift:
+
+   - **The redraw reuses the same request body.** Cache keys do not move, so an
+     unchanged rerun still costs nothing. Never add a seed or nonce to force
+     variation — it changes every hash and invalidates the whole cache.
+   - **The redraw loop sits outside the transport-retry loop.** A 429 retry is
+     not a redraw and a redraw does not burn the backoff budget; they are
+     different failures and are counted separately, for the same reason the
+     failure modes in decision 8 are.
+   - **A row that exhausts the cap is cached anyway**, flagged `cjk_residue`,
+     and left for the gate to raise on. Leaving it uncached would silently drop
+     it from `generations.jsonl` — "counted, never dropped" applies to the
+     residue too.
+
+   Every row generated under this rule records `cjk_redraws` and `cjk_residue`,
+   and `gen_data.py` prints a cumulative per-persona redraw table read back off
+   the cache. The redraw rate carries the same persona gradient the CJK rate
+   did; that is not a confound in the activations — every accepted row is
+   English — but it stays on the record rather than being assumed away.
+
 10. **Persona prompts are length-matched (44–50 words), including the anchor.**
    `default_assistant` must not be the shortest prompt in the set — otherwise
    "distance from the anchor" is partly "longer prompt", which is the confound

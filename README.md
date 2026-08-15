@@ -197,14 +197,21 @@ hardcoded constants, so a swap cannot silently reshape the data.
 - **Layer choice.** The best layer is selected on default-persona accuracy
   alone. Selecting it on transfer accuracy would select for the result being
   measured.
-- **English only, checked by Unicode range.** The generation prompt carries one
-  identical `Write in English only.` line in every cell. Qwen code-switches into
-  Chinese at temperature 1.0, and the language direction in activation space
-  dwarfs the emotion directions, so even a 1–2% rate is a strong outlier — worse,
-  the rate varies across personas. `gen_data.py` reports CJK per persona and
-  `01_data.ipynb` **raises** if the corpus is not 100% English. Never measure
-  this with `str.split()`: CJK has no spaces, so a fully-Chinese message counts
-  as 3 "words" and every length check goes blind to it.
+- **English only, by instruction and then by rejection sampling.** The
+  generation prompt carries one identical `Write in English only.` line in every
+  cell. Qwen code-switches into Chinese at temperature 1.0 anyway — 1.67% of run
+  3 carried the instruction and still came back with CJK — and the language
+  direction in activation space dwarfs the emotion directions, so even a 1–2%
+  rate is a strong outlier. Worse, the rate rose with distance from the
+  assistant, which is the x-axis of the headline figure. So a draw containing
+  CJK is **rejected and redrawn** (`config.MAX_CJK_REDRAWS`), uniformly in every
+  cell, making the corpus a sample from P(text | English) identically for every
+  persona; the redraw reuses the same request body, so cache keys do not move. A
+  row that exhausts the cap is cached and flagged rather than dropped. Rows
+  carry `cjk_redraws` / `cjk_residue`, `gen_data.py` prints redraws and CJK per
+  persona, and `01_data.ipynb` **raises** if the corpus is not 100% English.
+  Never measure this with `str.split()`: CJK has no spaces, so a fully-Chinese
+  message counts as 3 "words" and every length check goes blind to it.
 - **Emotion leakage is reported, never filtered.** `gen_data.py` and
   `01_data.ipynb` count generations that name their target emotion verbatim,
   **broken down by persona** as well as overall: if leakage varies systematically

@@ -18,7 +18,42 @@ from pathlib import Path
 # --------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent
-WORKSPACE = Path(os.environ.get("PP_WORKSPACE", "/workspace"))
+
+
+def _load_dotenv() -> None:
+    """Read KEY=VALUE lines from a gitignored .env, without adding a dependency.
+
+    Only stage 4 needs a secret (OPENROUTER_API_KEY).  A real environment
+    variable always wins, so `export`ing on the pod behaves exactly as before
+    and this is purely a local-shell convenience -- on Windows `setx` does not
+    affect the current process, which makes an exported key easy to lose.
+    """
+    path = REPO_ROOT / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
+# /workspace is the Runpod persistent volume.  Off the pod it does not exist,
+# and blindly using it means importing config creates C:\workspace (or /workspace
+# on a laptop) as a side effect of `python personas.py`.  Stage 4 and stages 6-8
+# run fine anywhere, so fall back to the repo itself -- hf_home/ is already
+# gitignored.  PP_WORKSPACE still overrides both.
+_ws_env = os.environ.get("PP_WORKSPACE")
+if _ws_env:
+    WORKSPACE = Path(_ws_env)
+else:
+    _pod_workspace = Path("/workspace")
+    WORKSPACE = _pod_workspace if _pod_workspace.is_dir() else REPO_ROOT
 
 # Where the ~65GB of weights land.  Set before any HF import happens.
 #
@@ -52,14 +87,14 @@ for _d in (DATA_DIR, OUT_DIR, FIG_DIR, GEN_CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # Stage outputs.
-TOPICS_JSON = DATA_DIR / "topics.json"                    # stage 2
-GENERATIONS_JSONL = DATA_DIR / "generations.jsonl"        # stage 4
-ACTIVATIONS_NPY = OUT_DIR / "activations.npy"             # stage 5
-ACTIVATIONS_META = OUT_DIR / "activations_meta.parquet"   # stage 5
-ACTIVATIONS_INFO = OUT_DIR / "activations_info.json"      # stage 5
-AXIS_NPY = OUT_DIR / "assistant_axis.npy"                 # stage 6
-AXIS_RANKING_JSON = OUT_DIR / "axis_ranking.json"         # stage 6
-PROBE_RESULTS_JSON = OUT_DIR / "probe_results.json"       # stage 7
+TOPICS_JSON = DATA_DIR / "topics.json"  # stage 2
+GENERATIONS_JSONL = DATA_DIR / "generations.jsonl"  # stage 4
+ACTIVATIONS_NPY = OUT_DIR / "activations.npy"  # stage 5
+ACTIVATIONS_META = OUT_DIR / "activations_meta.parquet"  # stage 5
+ACTIVATIONS_INFO = OUT_DIR / "activations_info.json"  # stage 5
+AXIS_NPY = OUT_DIR / "assistant_axis.npy"  # stage 6
+AXIS_RANKING_JSON = OUT_DIR / "axis_ranking.json"  # stage 6
+PROBE_RESULTS_JSON = OUT_DIR / "probe_results.json"  # stage 7
 
 # --------------------------------------------------------------------------
 # Models
@@ -139,8 +174,8 @@ EMOTIONS = [
     "surprised",
 ]
 
-N_TOPICS = 100                  # topic strings pulled from the HF dataset
-N_SCENARIOS_PER_CELL = 30       # scenarios per (persona, emotion) cell
+N_TOPICS = 100  # topic strings pulled from the HF dataset
+N_SCENARIOS_PER_CELL = 30  # scenarios per (persona, emotion) cell
 
 # Fully crossed design: THE SAME 30 topics are used in every (persona, emotion)
 # cell.  If topics varied by cell, a drop in transfer accuracy could be topic
@@ -155,6 +190,33 @@ TOPIC_SAMPLE_SEED = 0
 TARGET_WORDS = (100, 150)
 GEN_MAX_TOKENS = 300
 GEN_TEMPERATURE = 1.0
+
+# Rejection sampling on code-switching (see CLAUDE.md decision 9).
+#
+# Qwen code-switches into Chinese at temperature 1.0 and the English-only
+# instruction did not stop it: 54 rows (1.67%) in run 3, and -- the part that
+# matters -- at a rate that RISES with distance from the assistant, 0.3% on
+# close_friend to 3.6% on dream_logic.  The language direction in activation
+# space dwarfs the emotion directions, so those rows are strong outliers lying
+# along the x-axis of the headline figure.
+#
+# So a draw containing CJK is rejected and redrawn, up to this many times, as a
+# rule applied UNIFORMLY to every cell.  The corpus is then a sample from
+# P(text | English) identically for every persona.  This does condition on the
+# output; the defence is that the rule is uniform across cells rather than
+# applied post hoc to a finished corpus.
+#
+# The redraw does not change the request body -- temperature 1.0 resamples on
+# its own -- so cache keys do not move and an unchanged rerun still costs zero.
+# Never add a seed or nonce to force variation: that changes every hash and
+# invalidates the entire cache.
+#
+# 8 is a safety net, not an expected path: at the worst persona's 3.6% rate,
+# eight consecutive CJK draws has probability ~3e-12.  A row that exhausts the
+# cap is cached anyway, flagged, and reported -- an uncached row would be
+# silently omitted from generations.jsonl and would break the crossed design,
+# which is exactly what "counted, never dropped" exists to prevent.
+MAX_CJK_REDRAWS = 8
 
 # Pin the serving provider.  OpenRouter routes a model across several providers
 # that differ in quantization and serving stack, and it re-routes freely during a
@@ -172,7 +234,7 @@ GEN_TEMPERATURE = 1.0
 # So the corpus is generated at fp8; there is no working bf16 endpoint to pick.
 # Set to None to restore free routing (and re-introduce the confound).
 GENERATOR_PROVIDER = "DeepInfra"
-GENERATOR_ALLOW_FALLBACKS = False   # fail loudly rather than silently re-route
+GENERATOR_ALLOW_FALLBACKS = False  # fail loudly rather than silently re-route
 
 # Dispatch order is shuffled under this seed before any call is made, so that a
 # time-varying API condition spreads across personas as noise instead of hitting
@@ -188,7 +250,7 @@ REQUEST_TIMEOUT_SECONDS = 120
 
 # Extraction (stage 5).
 EXTRACT_BATCH_SIZE = 8
-MAX_SEQ_LEN = 1024          # generations are ~150 words; this is a guard, not a target
+MAX_SEQ_LEN = 1024  # generations are ~150 words; this is a guard, not a target
 
 # Probing (stage 7).
 # K-fold cross-validation over TOPICS, not rows.  30 topics / 5 folds = 6 topics
