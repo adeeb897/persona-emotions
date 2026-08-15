@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+
+# Stage outputs -- regenerate with the pipeline, do not commit.
+data/topics.json
+data/generations.jsonl
+data/gen_cache/
+outputs/
+hf_home/
