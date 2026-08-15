@@ -2,9 +2,19 @@ __pycache__/
 *.pyc
 .env
 
-# Stage outputs -- regenerate with the pipeline, do not commit.
-data/topics.json
-data/generations.jsonl
-data/gen_cache/
+# Stage 4 output IS committed, deliberately.
+#
+# The corpus costs an API budget, ~55 minutes, and a working provider pin, and
+# it cannot be reproduced byte-for-byte at temperature 1.0 -- a rerun gives a
+# different corpus, not the same one. Everything downstream (activations, axis,
+# probes, figures) is a pure function of it plus a GPU, so this is the one
+# artifact whose loss is not recoverable by rerunning the pipeline.
+#
+#   data/topics.json        the seeded 30-topic sample, pinned
+#   data/generations.jsonl  the corpus itself
+#   data/gen_cache/         per-call cache: makes a rerun free instead of $0.50
+#
+# Stage 5-8 outputs stay ignored: activations.npy is ~330MB and regenerating
+# them needs only the corpus above plus GPU time.
 outputs/
 hf_home/
