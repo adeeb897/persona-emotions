@@ -65,7 +65,23 @@ a change genuinely requires revisiting one, stop and ask first.
    separately: the first two look identical in a progress bar and were what
    identified the cause.
 
-9. **Persona prompts are length-matched (44–50 words), including the anchor.**
+9. **Generation enforces English only, and CJK must be zero.** The user prompt
+   carries `Write in English only.` — one line, identical in every cell, so it
+   cannot differentiate personas. Qwen code-switches into Chinese at temperature
+   1.0: an earlier run produced 50 such rows (1.54%) varying 0.0–3.1% across
+   personas. The language direction in activation space dwarfs the emotion
+   directions, so even a low rate puts strong outliers in the pooled activations,
+   and a rate that varies with persona contaminates the axis *and* transfer
+   accuracy. `gen_data.py` reports CJK per persona alongside leakage, and
+   `01_data.ipynb` has a **hard gate** that raises before extraction if the count
+   is not zero. Detection is by Unicode range, never by word count: `str.split()`
+   reports a 200-character Chinese message as 3 words, which is how this hid the
+   first time. `gen_data.count_words()` counts CJK properly — use it, not
+   `.split()`, anywhere length matters. Code-switched rows are **counted, never
+   dropped**: filtering would break the crossed design unevenly across personas,
+   which is the imbalance decision 8 exists to prevent.
+
+10. **Persona prompts are length-matched (44–50 words), including the anchor.**
    `default_assistant` must not be the shortest prompt in the set — otherwise
    "distance from the anchor" is partly "longer prompt", which is the confound
    `bare_template` exists to detect, applied to the anchor itself. Same skeleton

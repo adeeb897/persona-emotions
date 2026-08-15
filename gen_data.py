@@ -39,8 +39,41 @@ USER_PROMPT_TEMPLATE = (
     "Write about this situation in the first person, in about {lo}-{hi} words. "
     "As you write, you are feeling {emotion}. Do not name that feeling, and do "
     "not use any obvious synonym for it -- let it show only through what you "
-    "say and how you say it. Reply with the message only."
+    "say and how you say it. Write in English only. Reply with the message only."
 )
+
+# Qwen code-switches into Chinese at temperature 1.0.  Run 2 (no English
+# instruction) produced 50 such rows, 1.54%, varying 0.0-3.1% across personas.
+# That matters more than the rate suggests: the language direction in activation
+# space dwarfs the emotion directions, so a handful of code-switched rows are
+# strong outliers, and a rate that varies by persona contaminates both the axis
+# and transfer accuracy.  Hence the instruction above, and the checks below.
+#
+# Unicode ranges, not str.split() artifacts: CJK text has no spaces, so
+# `len(text.split())` reports a 200-character Chinese message as "3 words" and
+# the length checks are blinded to it.  That is how run 2 hid this.
+CJK_RE = re.compile(r"[一-鿿぀-ヿ㐀-䶿豈-﫿]")
+
+
+def has_cjk(text: str) -> bool:
+    return bool(CJK_RE.search(text))
+
+
+def cjk_fraction(text: str) -> float:
+    return len(CJK_RE.findall(text)) / max(len(text), 1)
+
+
+def count_words(text: str) -> int:
+    """Word count that does not go blind on CJK.
+
+    Whitespace tokens that contain no CJK, plus one per CJK character (the
+    conventional approximation -- a CJK character is roughly a word).  Using
+    str.split() alone reports a fully-Chinese generation as 3 words, which reads
+    as "suspiciously short" instead of "not English".
+    """
+    cjk = len(CJK_RE.findall(text))
+    latin = sum(1 for tok in text.split() if not CJK_RE.search(tok))
+    return latin + cjk
 
 
 def build_grid(limit: int | None = None) -> list[dict]:
@@ -259,6 +292,55 @@ def write_jsonl(grid: list[dict]) -> int:
     return n
 
 
+def report_cjk(grid: list[dict]) -> int:
+    """Count code-switched generations per persona.  Returns the total.
+
+    Unlike leakage, this one is expected to be ZERO: the prompt instructs
+    English only, and a non-zero count means the constraint did not hold. It is
+    still counted rather than filtered -- dropping rows would break the fully
+    crossed design (108 cells x exactly 30) and would do it unevenly across
+    personas, reintroducing the imbalance the provider pin removed.
+    """
+    counts, totals = {}, {}
+    worst = []
+    for item in grid:
+        p = cache_path(content_hash(request_for(item)))
+        if not p.exists():
+            continue
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        pid = rec["persona_id"]
+        totals[pid] = totals.get(pid, 0) + 1
+        if has_cjk(rec["text"]):
+            counts[pid] = counts.get(pid, 0) + 1
+            worst.append((cjk_fraction(rec["text"]), rec))
+
+    total = sum(counts.values())
+    n = sum(totals.values())
+    if not total:
+        print(f"\n[gen] CJK check: clean -- 0 of {n} generations contain CJK "
+              f"characters.")
+        return 0
+
+    print(f"\n[gen] WARNING: {total} of {n} generation(s) contain CJK characters "
+          f"({total / n:.2%}) despite the English-only instruction:")
+    print(f"    {'rank':<5} {'persona':<18} {'cjk':>5} {'of':>6} {'rate':>7}")
+    for pp in personas.PERSONAS:
+        pid = pp["id"]
+        if not totals.get(pid):
+            continue
+        c = counts.get(pid, 0)
+        tag = "  <- CONTROL" if pp["is_control"] else ""
+        print(f"    {pp['distance_rank']:<5} {pid:<18} {c:>5} {totals[pid]:>6} "
+              f"{c / totals[pid]:>6.1%}{tag}")
+    worst.sort(key=lambda t: -t[0])
+    f, rec = worst[0]
+    print(f"    worst: {rec['persona_id']}/{rec['emotion']}/{rec['scenario_id']} "
+          f"at {f:.0%} CJK")
+    print("    NOT dropped -- filtering would break the crossed design unevenly "
+          "across personas. This needs a decision, not a filter.")
+    return total
+
+
 def report_leakage(grid: list[dict]) -> None:
     """Flag rows where the target emotion appears verbatim.
 
@@ -455,6 +537,7 @@ def main() -> int:
     n = write_jsonl(grid)
     print(f"[gen] wrote {n}/{len(grid)} records -> {config.GENERATIONS_JSONL}")
     report_providers(grid)
+    report_cjk(grid)
     report_leakage(grid)
     return 0
 
