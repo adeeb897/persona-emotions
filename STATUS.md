@@ -12,8 +12,7 @@ the corpus (run 4) is 100% English with the crossed design intact. Stages 5–8
 run end to end on the **real 3,240-row corpus** at the 0.5b preset; the only
 thing left is one 32B extraction on a GPU.
 
-All of it is committed on the branch `run4-cjk-rejection-sampling` and **not
-pushed**. See the bottom of this file.
+All of it is committed and pushed to `main`. See the bottom of this file.
 
 ## What is in the repo
 
@@ -189,8 +188,9 @@ as Linux-only rather than warning about a missing file.
 
 ## What was committed
 
-On branch **`run4-cjk-rejection-sampling`**, not on `main`, and **not pushed**.
-Fast-forward `main` onto it when you are happy with it.
+Four commits, on **`main`** and pushed. They were authored on a branch, which
+was fast-forwarded into `main`; `run4-cjk-rejection-sampling` may still exist
+locally pointing at the same tip and can be deleted.
 
 | commit | what |
 | --- | --- |
