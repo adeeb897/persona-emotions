@@ -156,6 +156,30 @@ TARGET_WORDS = (100, 150)
 GEN_MAX_TOKENS = 300
 GEN_TEMPERATURE = 1.0
 
+# Pin the serving provider.  OpenRouter routes a model across several providers
+# that differ in quantization and serving stack, and it re-routes freely during a
+# run.  Because the grid is built persona-major, a provider that appears or
+# breaks mid-run lands on a contiguous block of ONE persona -- an API condition
+# that maps straight onto the experiment's x-axis.  That is the same class of
+# confound as per-persona emotion leakage, so it is pinned, not left to chance.
+#
+# As probed on 2026-08-15, qwen-2.5-72b-instruct has exactly two endpoints:
+#   DeepInfra  fp8   works
+#   Novita     bf16  rejects chat-completions requests outright ("does not
+#                    support endpoint: completions") -- the cause of the 192
+#                    failures in the first run, all of them clustered in 5 of
+#                    the 9 personas.
+# So the corpus is generated at fp8; there is no working bf16 endpoint to pick.
+# Set to None to restore free routing (and re-introduce the confound).
+GENERATOR_PROVIDER = "DeepInfra"
+GENERATOR_ALLOW_FALLBACKS = False   # fail loudly rather than silently re-route
+
+# Dispatch order is shuffled under this seed before any call is made, so that a
+# time-varying API condition spreads across personas as noise instead of hitting
+# one persona's block.  Cache keys are content-based, so shuffling changes
+# nothing on disk and generations.jsonl is still written in canonical grid order.
+DISPATCH_SEED = 0
+
 # API politeness / robustness (stage 4).
 CONCURRENCY = 8
 MAX_RETRIES = 5

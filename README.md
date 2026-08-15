@@ -153,6 +153,16 @@ python plot.py                          # -> outputs/figures/
 content, so a rerun refetches only what is missing and editing one persona's
 prompt invalidates only that persona. A run that dies at 90% costs the last 10%.
 
+The serving provider is **pinned** (`config.GENERATOR_PROVIDER`) and recorded on
+every row, and dispatch order is **shuffled** (`config.DISPATCH_SEED`). Both
+exist because the grid is persona-major, so an API condition that varies with
+wall-clock lands on one persona's contiguous block and is indistinguishable from
+a persona effect. The first run demonstrated this: 192 rows lost to a provider
+that rejects chat-completions requests, concentrated in 5 of the 9 personas (74
+in `close_friend`, 0 in the first three). The provider pin is part of the request
+body and therefore part of the cache key — a corpus generated under free routing
+and one generated on a pinned provider are not interchangeable and will not blend.
+
 Model swap is one variable:
 
 ```bash

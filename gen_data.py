@@ -8,6 +8,13 @@ completed call is written to its own file in data/gen_cache/ keyed by a hash of
 the exact request content, and a rerun skips anything already cached.  A run
 that dies at 90% costs you the last 10%, not the whole thing.
 
+Two things here exist to keep API conditions from correlating with persona,
+because the grid is built persona-major and a 360-row block IS one persona:
+the serving provider is PINNED (config.GENERATOR_PROVIDER) and recorded per
+row, and dispatch order is SHUFFLED (config.DISPATCH_SEED) so an outage window
+spreads across personas as noise.  The first run had neither, and lost 192 rows
+concentrated in 5 of the 9 personas.
+
     python gen_data.py --limit 8      # smoke test, ~8 calls
     python gen_data.py                # the real run
     python gen_data.py --dry-run      # print the grid and cost estimate, call nothing
@@ -74,13 +81,25 @@ def user_prompt_for(item: dict) -> str:
 
 
 def request_for(item: dict) -> dict:
-    """The exact API request body for a grid item."""
-    return {
+    """The exact API request body for a grid item.
+
+    Includes the provider pin when one is configured.  That makes the pin part
+    of the content hash, which is correct: a corpus generated under free routing
+    and one generated on a pinned provider are not interchangeable, and the
+    cache must not blend them.
+    """
+    body = {
         "model": config.GENERATOR_MODEL,
         "messages": personas.build_messages(item["persona_id"], user_prompt_for(item)),
         "temperature": config.GEN_TEMPERATURE,
         "max_tokens": config.GEN_MAX_TOKENS,
     }
+    if config.GENERATOR_PROVIDER:
+        body["provider"] = {
+            "order": [config.GENERATOR_PROVIDER],
+            "allow_fallbacks": config.GENERATOR_ALLOW_FALLBACKS,
+        }
+    return body
 
 
 def content_hash(body: dict) -> str:
@@ -96,6 +115,29 @@ def content_hash(body: dict) -> str:
 
 def cache_path(h: str):
     return config.GEN_CACHE_DIR / f"{h}.json"
+
+
+def note_failure(stats: dict, mode: str, item: dict, detail: str) -> None:
+    """Record how a call failed, not just that it did.
+
+    The first run's failures arrived in two shapes that look identical in a
+    progress bar and are diagnosed completely differently:
+
+      http_4xx        HTTP 400 from OpenRouter itself -- permanent, not retried
+      api_error_200   HTTP 200 whose BODY carries an error -- retried to
+                      exhaustion before being given up on, so it burns the full
+                      backoff budget while being just as permanent
+      transient       anything else (timeout, 5xx, 429) that survived retries
+
+    Both of the first two were the same underlying cause (a provider rejecting
+    the endpoint), and telling them apart is what identified it.
+    """
+    stats["fail_modes"][mode] = stats["fail_modes"].get(mode, 0) + 1
+    stats["fail_by_persona"][item["persona_id"]] = (
+        stats["fail_by_persona"].get(item["persona_id"], 0) + 1)
+    stats["failed"] += 1
+    if mode not in stats["fail_examples"]:
+        stats["fail_examples"][mode] = detail[:200]
 
 
 async def call_one(client, item: dict, body: dict, h: str, stats: dict) -> dict | None:
@@ -124,10 +166,20 @@ async def call_one(client, item: dict, body: dict, h: str, stats: dict) -> dict 
                 stats["in_tok"] += usage.get("prompt_tokens", 0)
                 stats["out_tok"] += usage.get("completion_tokens", 0)
 
+                # Which provider actually served this row.  OpenRouter reports
+                # it per response; without persisting it, provider
+                # heterogeneity across the corpus is unauditable after the
+                # fact -- which is exactly what went wrong on the first run.
+                served_by = payload.get("provider")
+                stats["providers"][served_by] = stats["providers"].get(served_by, 0) + 1
+
                 return {
                     **item,
                     "text": text,
                     "generator_model": config.GENERATOR_MODEL,
+                    "generator_provider": served_by,
+                    "generator_provider_pinned": config.GENERATOR_PROVIDER,
+                    "returned_model": payload.get("model"),
                     "content_hash": h,
                     "prompt_tokens": usage.get("prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
@@ -139,7 +191,8 @@ async def call_one(client, item: dict, body: dict, h: str, stats: dict) -> dict 
                 print(f"\n[gen] permanent {resp.status_code} for "
                       f"{item['persona_id']}/{item['emotion']}/{item['scenario_id']}: "
                       f"{resp.text[:200]}")
-                stats["failed"] += 1
+                note_failure(stats, "http_4xx", item,
+                             f"HTTP {resp.status_code}: {resp.text}")
                 return None
             raise RuntimeError(f"http {resp.status_code}")
 
@@ -147,7 +200,10 @@ async def call_one(client, item: dict, body: dict, h: str, stats: dict) -> dict 
             if attempt == config.MAX_RETRIES - 1:
                 print(f"\n[gen] gave up on {item['persona_id']}/{item['emotion']}/"
                       f"{item['scenario_id']} after {config.MAX_RETRIES}: {exc}")
-                stats["failed"] += 1
+                # An error carried inside a 200 body is a different animal from
+                # a timeout, even though both land here after retries.
+                mode = "api_error_200" if str(exc).startswith("api error") else "transient"
+                note_failure(stats, mode, item, str(exc))
                 return None
             await asyncio.sleep(config.BACKOFF_BASE_SECONDS * (2 ** attempt))
     return None
@@ -264,6 +320,52 @@ def report_leakage(grid: list[dict]) -> None:
     print("\n    (synonyms are not detected -- this is a floor, not a ceiling)")
 
 
+def report_providers(grid: list[dict]) -> None:
+    """Which provider served each persona's rows.
+
+    Reported for the same reason leakage is: OpenRouter's providers differ in
+    quantization and serving stack, so if provider assignment varies across
+    personas it varies along the x-axis of the headline figure.  Pinning is
+    supposed to make this table trivial -- one column, flat.  If it is not
+    trivial, the pin did not hold and the corpus is heterogeneous.
+    """
+    counts, missing = {}, 0
+    for item in grid:
+        p = cache_path(content_hash(request_for(item)))
+        if not p.exists():
+            continue
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        prov = rec.get("generator_provider")
+        if prov is None:
+            missing += 1
+        counts.setdefault(rec["persona_id"], {})
+        counts[rec["persona_id"]][prov] = counts[rec["persona_id"]].get(prov, 0) + 1
+
+    if not counts:
+        return
+    provs = sorted({p for row in counts.values() for p in row},
+                   key=lambda p: (p is None, str(p)))
+
+    print(f"\n[gen] serving provider by persona "
+          f"(pinned: {config.GENERATOR_PROVIDER or 'NONE -- free routing'})")
+    header = f"    {'persona':<18}" + "".join(f"{str(p):>14}" for p in provs)
+    print(header)
+    for pp in personas.PERSONAS:
+        row = counts.get(pp["id"])
+        if not row:
+            continue
+        print(f"    {pp['id']:<18}" + "".join(f"{row.get(p, 0):>14}" for p in provs))
+
+    if len(provs) > 1:
+        print("    WARNING: more than one provider served this corpus. Provider "
+              "differs in quantization, so this is a systematic difference "
+              "between rows that is NOT persona.")
+    if missing:
+        print(f"    NOTE: {missing} row(s) carry no provider field -- generated "
+              f"before provider logging existed. Treat them as unknown, not as "
+              f"the pinned provider.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--limit", type=int, default=None,
@@ -289,7 +391,19 @@ def main() -> int:
         else:
             todo.append((item, body, h))
 
+    # Shuffle DISPATCH order only.  The grid stays canonical for write_jsonl and
+    # the leakage report; what changes is the sequence calls go out in, so a
+    # provider outage or rate-limit window mid-run spreads across personas as
+    # noise instead of landing on one persona's contiguous 360-row block. Cache
+    # keys are content-based, so this invalidates nothing.
+    random.Random(config.DISPATCH_SEED).shuffle(todo)
+
     print(f"[gen] {cached} already cached, {len(todo)} to fetch")
+    print(f"[gen] provider: "
+          + (f"pinned to {config.GENERATOR_PROVIDER} "
+             f"(fallbacks {'on' if config.GENERATOR_ALLOW_FALLBACKS else 'OFF'})"
+             if config.GENERATOR_PROVIDER else "free routing (NOT pinned)"))
+    print(f"[gen] dispatch order shuffled under DISPATCH_SEED={config.DISPATCH_SEED}")
 
     if args.dry_run or not todo:
         est_in = len(todo) * 260
@@ -310,19 +424,37 @@ def main() -> int:
         if not os.environ.get("OPENROUTER_API_KEY"):
             print("[gen] ERROR: OPENROUTER_API_KEY is not set")
             return 1
-        stats = {"in_tok": 0, "out_tok": 0, "done": 0, "failed": 0}
+        stats = {"in_tok": 0, "out_tok": 0, "done": 0, "failed": 0,
+                 "providers": {}, "fail_modes": {}, "fail_by_persona": {},
+                 "fail_examples": {}}
         t0 = time.time()
         asyncio.run(run(todo, stats))
         print(f"[gen] {stats['done']} fetched, {stats['failed']} failed, "
               f"{time.time() - t0:.0f}s")
         print(f"[gen] tokens: {stats['in_tok']:,} in / {stats['out_tok']:,} out "
               f"-> ${estimated_cost(stats):.2f} estimated this run")
+
+        if stats["providers"]:
+            print("[gen] served by: " + ", ".join(
+                f"{p} x{n}" for p, n in sorted(stats["providers"].items(),
+                                               key=lambda kv: -kv[1])))
         if stats["failed"]:
-            print(f"[gen] {stats['failed']} item(s) left uncached -- rerun to retry "
+            print(f"\n[gen] {stats['failed']} item(s) left uncached -- rerun to retry "
                   f"just those")
+            print("    failure modes:")
+            for mode, n in sorted(stats["fail_modes"].items(), key=lambda kv: -kv[1]):
+                print(f"      {n:5d}  {mode}")
+                print(f"             e.g. {stats['fail_examples'].get(mode, '')[:150]}")
+            print("    failures by persona (should be flat; a spike on one "
+                  "persona is the confound):")
+            for p in personas.PERSONAS:
+                n = stats["fail_by_persona"].get(p["id"], 0)
+                if n:
+                    print(f"      {n:5d}  {p['id']}")
 
     n = write_jsonl(grid)
     print(f"[gen] wrote {n}/{len(grid)} records -> {config.GENERATIONS_JSONL}")
+    report_providers(grid)
     report_leakage(grid)
     return 0
 

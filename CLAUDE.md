@@ -48,7 +48,24 @@ a change genuinely requires revisiting one, stop and ask first.
    x-axis of the headline figure. Whether a leaked row is still a valid sample is
    the researcher's call, not the script's.
 
-8. **Persona prompts are length-matched (44–50 words), including the anchor.**
+8. **Dispatch order is shuffled (`config.DISPATCH_SEED` = 0), and the serving
+   provider is pinned (`config.GENERATOR_PROVIDER`) and logged per row.** Same
+   class of confound as per-persona leakage, arrived at the hard way. The grid is
+   built persona-major, so a contiguous block of 360 calls *is* one persona: any
+   time-varying API condition — a provider entering or leaving the routing pool,
+   rate limiting, a model version flip — lands on one persona and masquerades as
+   a persona effect. The first run lost 192 rows to a provider that rejects
+   chat-completions requests, and they fell in 5 of the 9 personas, 74 in
+   `close_friend` and 0 in the first three. Shuffling spreads such windows across
+   personas as noise; pinning removes the routing variance; logging the provider
+   makes what remains auditable instead of assumed. `gen_data.py` prints a
+   provider-by-persona table, which should be one column and flat — if it isn't,
+   the pin did not hold and the corpus is heterogeneous in quantization.
+   Failure modes (`http_4xx` vs `api_error_200` vs `transient`) are counted
+   separately: the first two look identical in a progress bar and were what
+   identified the cause.
+
+9. **Persona prompts are length-matched (44–50 words), including the anchor.**
    `default_assistant` must not be the shortest prompt in the set — otherwise
    "distance from the anchor" is partly "longer prompt", which is the confound
    `bare_template` exists to detect, applied to the anchor itself. Same skeleton
